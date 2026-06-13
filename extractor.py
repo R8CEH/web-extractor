@@ -34,13 +34,15 @@ from markdownify import markdownify as md
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── Пул браузеров ────────────────────────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
 
-MAX_CONCURRENT = 10          # максимум параллельных страниц
-CACHE_TTL = 300              # кеш 5 минут
-CACHE_MAX_SIZE = 1000        # максимум записей в кеше
-REQUEST_TIMEOUT = 30_000     # таймаут загрузки страницы (мс)
-MARKDOWN_LINE_LIMIT = 2000   # лимит строк в итоговом markdown
+MAX_CONCURRENT = 10          # max concurrent pages
+CACHE_TTL = 300              # cache TTL: 5 minutes
+CACHE_MAX_SIZE = 1000        # max cache entries
+REQUEST_TIMEOUT = 30_000     # page load timeout (ms)
+MARKDOWN_LINE_LIMIT = 2000   # max lines in output markdown
+HOST = "127.0.0.1"
+PORT = 3002
 READABILITY_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Readability.js")
 
 _playwright = None
@@ -91,7 +93,7 @@ async def new_context(browser: Browser) -> BrowserContext:
 
 
 def _build_result(title: str, html: str, url: str) -> dict:
-    """HTML → markdown → финальный dict ответа."""
+    """HTML → markdown → final response dict."""
     markdown = md(
         html,
         heading_style="ATX",
@@ -101,7 +103,7 @@ def _build_result(title: str, html: str, url: str) -> dict:
                  "strong", "em", "a", "table", "tr", "td", "th"]
     )
 
-    # Схлопываем повторные пустые строки, сохраняем все контентные
+    # Collapse consecutive blank lines, keep all content lines
     grouped = itertools.groupby(markdown.splitlines(), key=lambda l: bool(l.strip()))
     lines = []
     for has_content, group in grouped:
@@ -125,7 +127,7 @@ def _build_result(title: str, html: str, url: str) -> dict:
 
 
 async def _fetch_page(url: str) -> dict:
-    """Браузерная экстракция без кеша."""
+    """Browser extraction without cache."""
     browser = await get_browser()
     context = None
     try:
@@ -138,16 +140,15 @@ async def _fetch_page(url: str) -> dict:
             timeout=REQUEST_TIMEOUT
         )
 
-        # Ждём готовности сети, но не дольше 5 секунд
+        # Wait for network idle, no more than 5 seconds
         try:
             await page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
-            pass  # networkidle не наступил — продолжаем с тем, что есть
+            pass  # networkidle not reached — continue with what we have
 
-        # Загружаем Mozilla Readability.js
         await page.add_script_tag(path=READABILITY_JS_PATH)
 
-        # Вызываем парсинг
+        # Parse with Readability
         extracted = await page.evaluate("""
             () => {
                 const reader = new Readability(document);
@@ -182,9 +183,9 @@ async def _fetch_page(url: str) -> dict:
 
 
 async def extract_page(url: str) -> dict:
-    """Извлечь контент страницы. Возвращает dict с markdown, title, url."""
+    """Extract page content. Returns dict with markdown, title, url."""
 
-    # Проверяем кеш
+    # Check cache
     result = _cache.get(url)
     if result is not None:
         logger.info(f"Cache hit: {url}")
@@ -201,7 +202,7 @@ async def extract_page(url: str) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Прогреваем браузер при старте
+    # Warm up the browser on startup
     await get_browser()
     logger.info(f"Extractor ready. Max concurrent: {MAX_CONCURRENT}")
     yield
@@ -243,7 +244,7 @@ async def scrape(req: ScrapeRequest):
 
 @app.post("/v2/batch")
 async def batch_scrape(req: BatchRequest):
-    """Параллельное извлечение нескольких URL."""
+    """Extract multiple URLs in parallel."""
     if len(req.urls) > MAX_CONCURRENT:
         raise HTTPException(
             status_code=400,
@@ -282,7 +283,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "extractor:app",
-        host="127.0.0.1",
-        port=3002,
+        host=HOST,
+        port=PORT,
         log_level="info"
     )
