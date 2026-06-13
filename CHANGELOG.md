@@ -23,3 +23,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Creates virtualenv, installs dependencies, installs Playwright Chromium
   - Configures Hermes Agent (Firecrawl backend + env vars)
   - Sets up auto-start: systemd (Linux), launchd (macOS), Task Scheduler (Windows)
+  - Idempotent: re-running the script updates the service instead of reinstalling from scratch

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ─── Web Extractor — Install Script (Linux / macOS) ──────────────────────────
+# ─── Web Extractor — Install / Update Script (Linux / macOS) ─────────────────
 #
-# What this does:
+# Fresh install:
 #   1. Detects the OS (Linux / macOS)
 #   2. Checks for Python 3.10+
 #   3. Checks for Hermes Agent
@@ -11,9 +11,15 @@
 #   7. Sets up auto-start: systemd (Linux) or launchd (macOS)
 #   8. Starts the service and runs a health check
 #
+# Update (existing installation detected):
+#   Downloads new files, updates Python dependencies, restarts the service.
+#   Skips Chromium install and Hermes configuration.
+#
 # Usage:
 #   chmod +x install.sh
 #   ./install.sh
+#
+# Re-run at any time to update to the latest version.
 # ────────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -25,6 +31,7 @@ DOWNLOAD_URL_READABILITY="https://raw.githubusercontent.com/r8ceh/web-extractor/
 
 INSTALL_DIR="$HOME/web-extractor"
 VENV_DIR="$INSTALL_DIR/.venv"
+EXTRACTOR_PATH="$INSTALL_DIR/extractor.py"
 SERVICE_PORT="3002"
 HERMES_HOME="$HOME/.hermes"
 HERMES_ENV="$HERMES_HOME/.env"
@@ -36,18 +43,32 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-step()        { echo -e "\n${BOLD}${CYAN}─── $1${NC}"; }
-ok()          { echo -e "  ${GREEN}✓${NC} $1"; }
-warn()        { echo -e "  ${YELLOW}⚠${NC} $1"; }
-fail()        { echo -e "  ${RED}✗${NC} $1"; }
-info()        { echo -e "    $1"; }
+step()  { echo -e "\n${BOLD}${CYAN}─── $1${NC}"; }
+ok()    { echo -e "  ${GREEN}✓${NC} $1"; }
+warn()  { echo -e "  ${YELLOW}⚠${NC} $1"; }
+fail()  { echo -e "  ${RED}✗${NC} $1"; }
+info()  { echo -e "    $1"; }
 
 die() {
     echo -e "\n${RED}${BOLD}ERROR:${NC} $1"
     exit 1
 }
+
+# ─── Detect install vs update mode ──────────────────────────────────────────────
+
+IS_UPDATE=false
+CURRENT_VERSION="(not installed)"
+
+if [ -f "$EXTRACTOR_PATH" ]; then
+    IS_UPDATE=true
+    CURRENT_VERSION=$(grep -o '__version__ = "[^"]*"' "$EXTRACTOR_PATH" \
+        | cut -d'"' -f2 2>/dev/null || echo "unknown")
+    echo -e "${BOLD}${CYAN}▶ Update mode — upgrading from v${CURRENT_VERSION}${NC}"
+else
+    echo -e "${BOLD}${CYAN}▶ Fresh install${NC}"
+fi
 
 # ─── Step 0: Detect OS ──────────────────────────────────────────────────────────
 
@@ -95,7 +116,6 @@ if [ -z "$PYTHON" ]; then
     die "Python 3.10+ is required to run Web Extractor"
 fi
 
-# Check venv — on some Linux distros it's a separate package
 if ! "$PYTHON" -m venv --help &>/dev/null; then
     warn "The venv module is not installed"
     if [ "$OS_TYPE" = "linux" ]; then
@@ -134,15 +154,12 @@ if [ "$HERMES_CMD" = false ] && [ "$HERMES_DIR" = false ]; then
     warn "Continuing without Hermes — you can run this script again later"
     warn "to configure Hermes after installing it."
     SKIP_HERMES=true
-    SKIP_HERMES_CMD=true
 elif [ "$HERMES_CMD" = false ]; then
     warn "Hermes found at $HERMES_HOME but hermes command is not in PATH"
     warn "Skipping Hermes configuration — add hermes to PATH and re-run this script"
     SKIP_HERMES=true
-    SKIP_HERMES_CMD=true
 else
     SKIP_HERMES=false
-    SKIP_HERMES_CMD=false
 fi
 
 # ─── Step 3: Download files from GitHub ─────────────────────────────────────────
@@ -156,21 +173,13 @@ download_file() {
     local dest="$2"
     local name="$3"
 
-    if [ -f "$dest" ]; then
-        warn "$name already exists — skipping (delete $dest to re-download)"
-        return 0
-    fi
-
     info "Downloading $name..."
-    if curl -sSL --connect-timeout 10 --max-time 30 -o "$dest" "$url"; then
-        ok "$name downloaded ($(wc -c < "$dest") bytes)"
-    else
-        rm -f "$dest"
-        die "Failed to download $name from $url"
-    fi
+    curl -sSL --connect-timeout 10 --max-time 30 -o "$dest" "$url" \
+        || { rm -f "$dest"; die "Failed to download $name from $url"; }
+    ok "$name downloaded ($(wc -c < "$dest") bytes)"
 }
 
-download_file "$DOWNLOAD_URL_EXTRACTOR"  "$INSTALL_DIR/extractor.py"   "extractor.py"
+download_file "$DOWNLOAD_URL_EXTRACTOR"   "$EXTRACTOR_PATH"             "extractor.py"
 download_file "$DOWNLOAD_URL_READABILITY" "$INSTALL_DIR/Readability.js" "Readability.js"
 
 # ─── Step 4: Virtual environment and dependencies ───────────────────────────────
@@ -194,28 +203,31 @@ info "Upgrading pip..."
 info "Installing Python dependencies..."
 "$VENV_PIP" install fastapi uvicorn markdownify playwright cachetools -q
 
-info "Installing Playwright Chromium..."
-if ! "$VENV_DIR/bin/playwright" install chromium 2>&1 | tail -1; then
-    warn "Failed to install Chromium — trying to install system dependencies..."
-    if [ "$OS_TYPE" = "linux" ]; then
-        "$VENV_DIR/bin/playwright" install-deps chromium 2>&1 || true
-        "$VENV_DIR/bin/playwright" install chromium 2>&1 || \
+if [ "$IS_UPDATE" = false ]; then
+    info "Installing Playwright Chromium..."
+    if ! "$VENV_DIR/bin/playwright" install chromium 2>&1 | tail -1; then
+        warn "Failed to install Chromium — trying to install system dependencies..."
+        if [ "$OS_TYPE" = "linux" ]; then
+            "$VENV_DIR/bin/playwright" install-deps chromium 2>&1 || true
+            "$VENV_DIR/bin/playwright" install chromium 2>&1 || \
+                die "Failed to install Playwright Chromium"
+        else
             die "Failed to install Playwright Chromium"
-    else
-        die "Failed to install Playwright Chromium"
+        fi
     fi
-fi
-ok "Playwright Chromium installed"
+    ok "Playwright Chromium installed"
 
-# Install firecrawl SDK for Hermes
-info "Installing Firecrawl SDK (for Hermes Agent)..."
-"$VENV_PIP" install firecrawl -q || warn "Firecrawl SDK not installed (Hermes may use its own)"
+    info "Installing Firecrawl SDK (for Hermes Agent)..."
+    "$VENV_PIP" install firecrawl -q || warn "Firecrawl SDK not installed (Hermes may use its own)"
+else
+    ok "Skipping Chromium install (update mode)"
+fi
 
 ok "All dependencies installed"
 
 # ─── Step 5: Clean up duplicates in Hermes .env ─────────────────────────────────
 
-if [ "$SKIP_HERMES" = false ]; then
+if [ "$IS_UPDATE" = false ] && [ "$SKIP_HERMES" = false ]; then
     step "Step 5: Checking Hermes configuration"
 
     for KEY in FIRECRAWL_API_URL FIRECRAWL_API_KEY; do
@@ -223,15 +235,12 @@ if [ "$SKIP_HERMES" = false ]; then
             count=$(grep -c "^${KEY}=" "$HERMES_ENV" 2>/dev/null || true)
             if [ "$count" -gt 1 ]; then
                 warn "Found $count duplicates of $KEY in ~/.hermes/.env — removing all, keeping the last one"
-                # Save the last value
                 last_value=$(grep "^${KEY}=" "$HERMES_ENV" | tail -1 | cut -d= -f2-)
-                # Remove all lines with this key
                 if [ "$OS_TYPE" = "macos" ]; then
                     sed -i '' "/^${KEY}=/d" "$HERMES_ENV"
                 else
                     sed -i "/^${KEY}=/d" "$HERMES_ENV"
                 fi
-                # Restore the last value
                 echo "${KEY}=${last_value}" >> "$HERMES_ENV"
                 ok "Duplicates of $KEY fixed"
             elif [ "$count" -eq 1 ]; then
@@ -241,13 +250,15 @@ if [ "$SKIP_HERMES" = false ]; then
             fi
         fi
     done
+elif [ "$IS_UPDATE" = true ]; then
+    step "Step 5: Checking Hermes configuration — skipped (update mode)"
 else
     step "Step 5: Checking Hermes configuration — skipped (Hermes not found)"
 fi
 
 # ─── Step 6: Configure Hermes ───────────────────────────────────────────────────
 
-if [ "$SKIP_HERMES" = false ]; then
+if [ "$IS_UPDATE" = false ] && [ "$SKIP_HERMES" = false ]; then
     step "Step 6: Configuring Hermes Agent"
 
     info "web.extract_backend → firecrawl"
@@ -261,6 +272,8 @@ if [ "$SKIP_HERMES" = false ]; then
     info "FIRECRAWL_API_KEY → local"
     hermes config set FIRECRAWL_API_KEY local
     ok "FIRECRAWL_API_KEY = local"
+elif [ "$IS_UPDATE" = true ]; then
+    step "Step 6: Configuring Hermes Agent — skipped (update mode)"
 else
     step "Step 6: Configuring Hermes Agent — skipped (Hermes not found)"
     info "Once Hermes is installed, run:"
@@ -273,7 +286,6 @@ fi
 
 step "Step 7: Setting up auto-start"
 
-EXTRACTOR_PATH="$INSTALL_DIR/extractor.py"
 CURRENT_USER="$(whoami)"
 
 if [ "$OS_TYPE" = "linux" ]; then
@@ -281,7 +293,15 @@ if [ "$OS_TYPE" = "linux" ]; then
     SERVICE_NAME="web-extractor"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-    SERVICE_CONTENT="[Unit]
+    if [ "$IS_UPDATE" = true ]; then
+        info "Restarting service..."
+        if sudo systemctl restart "$SERVICE_NAME" 2>&1; then
+            ok "Service restarted"
+        else
+            warn "Failed to restart service — check logs: sudo journalctl -u $SERVICE_NAME -n 20"
+        fi
+    else
+        SERVICE_CONTENT="[Unit]
 Description=Web Extractor — self-hosted Firecrawl-compatible web extractor
 After=network.target
 
@@ -296,23 +316,24 @@ Environment=PYTHONUNBUFFERED=1
 [Install]
 WantedBy=multi-user.target"
 
-    if [ -f "$SERVICE_FILE" ]; then
-        warn "systemd unit already exists: $SERVICE_FILE"
-        info "Stopping and recreating..."
-        sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    fi
+        if [ -f "$SERVICE_FILE" ]; then
+            warn "systemd unit already exists: $SERVICE_FILE"
+            info "Stopping and recreating..."
+            sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        fi
 
-    echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
-    ok "Unit created: $SERVICE_FILE"
+        echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
+        ok "Unit created: $SERVICE_FILE"
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable "$SERVICE_NAME"
-    ok "Auto-start enabled (systemctl enable)"
+        sudo systemctl daemon-reload
+        sudo systemctl enable "$SERVICE_NAME"
+        ok "Auto-start enabled (systemctl enable)"
 
-    if sudo systemctl start "$SERVICE_NAME" 2>&1; then
-        ok "Service started"
-    else
-        warn "Failed to start service — check logs: sudo journalctl -u $SERVICE_NAME -n 20"
+        if sudo systemctl start "$SERVICE_NAME" 2>&1; then
+            ok "Service started"
+        else
+            warn "Failed to start service — check logs: sudo journalctl -u $SERVICE_NAME -n 20"
+        fi
     fi
 
 elif [ "$OS_TYPE" = "macos" ]; then
@@ -322,9 +343,18 @@ elif [ "$OS_TYPE" = "macos" ]; then
     STDOUT_LOG="/tmp/web-extractor.stdout"
     STDERR_LOG="/tmp/web-extractor.stderr"
 
-    mkdir -p "$HOME/Library/LaunchAgents"
+    if [ "$IS_UPDATE" = true ]; then
+        info "Restarting service..."
+        if launchctl kickstart -k "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null; then
+            ok "Service restarted"
+        else
+            warn "Failed to restart service"
+            info "Logs: $STDERR_LOG"
+        fi
+    else
+        mkdir -p "$HOME/Library/LaunchAgents"
 
-    PLIST_CONTENT="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+        PLIST_CONTENT="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"
   \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
@@ -361,25 +391,25 @@ elif [ "$OS_TYPE" = "macos" ]; then
 </dict>
 </plist>"
 
-    # Unload old plist if it exists
-    if [ -f "$PLIST_FILE" ]; then
-        warn "launchd agent already exists — unloading old one..."
-        if launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null; then
-            ok "Old agent unloaded"
-        else
-            warn "Failed to unload old agent (may not be running)"
+        if [ -f "$PLIST_FILE" ]; then
+            warn "launchd agent already exists — unloading old one..."
+            if launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null; then
+                ok "Old agent unloaded"
+            else
+                warn "Failed to unload old agent (may not be running)"
+            fi
         fi
-    fi
 
-    echo "$PLIST_CONTENT" > "$PLIST_FILE"
-    ok "plist created: $PLIST_FILE"
+        echo "$PLIST_CONTENT" > "$PLIST_FILE"
+        ok "plist created: $PLIST_FILE"
 
-    if launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE" 2>&1; then
-        ok "Agent loaded into launchd"
-    else
-        warn "Failed to load agent into launchd"
-        info "Check the plist manually: $PLIST_FILE"
-        info "Logs: $STDERR_LOG"
+        if launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE" 2>&1; then
+            ok "Agent loaded into launchd"
+        else
+            warn "Failed to load agent into launchd"
+            info "Check the plist manually: $PLIST_FILE"
+            info "Logs: $STDERR_LOG"
+        fi
     fi
 fi
 
@@ -406,11 +436,23 @@ fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
+NEW_VERSION=$(grep -o '__version__ = "[^"]*"' "$EXTRACTOR_PATH" \
+    | cut -d'"' -f2 2>/dev/null || echo "unknown")
+
 echo ""
 echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo -e "${BOLD}${GREEN}  Web Extractor installation complete!${NC}"
+if [ "$IS_UPDATE" = true ]; then
+    echo -e "${BOLD}${GREEN}  Web Extractor updated!${NC}"
+else
+    echo -e "${BOLD}${GREEN}  Web Extractor installed!${NC}"
+fi
 echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════════${NC}"
 echo ""
+if [ "$IS_UPDATE" = true ]; then
+    echo -e "  Updated:       ${BOLD}v${CURRENT_VERSION} → v${NEW_VERSION}${NC}"
+else
+    echo -e "  Version:       ${BOLD}v${NEW_VERSION}${NC}"
+fi
 echo -e "  Service:       ${BOLD}http://127.0.0.1:${SERVICE_PORT}${NC}"
 echo -e "  Health:        ${BOLD}curl http://127.0.0.1:${SERVICE_PORT}/health${NC}"
 echo -e "  Directory:     ${BOLD}${INSTALL_DIR}${NC}"

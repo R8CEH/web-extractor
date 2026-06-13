@@ -169,6 +169,24 @@ hermes config set FIRECRAWL_API_KEY local
 
 > **Note:** Step 5 is only needed if you use Hermes Agent. `hermes config set` safely updates existing values in `.env` without creating duplicates.
 
+## Updating
+
+Run the same install command — the script detects an existing installation and only updates the service files, refreshes Python dependencies, and restarts the service. Chromium and Hermes configuration are not touched.
+
+**Linux / macOS:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/r8ceh/web-extractor/main/install.sh | bash
+```
+
+**Windows:**
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/r8ceh/web-extractor/main/install.ps1" -OutFile "install.ps1"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+./install.ps1
+```
+
 ## Requirements
 
 | Component | Minimum |
