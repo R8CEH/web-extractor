@@ -158,7 +158,7 @@ python3 -m playwright install chromium
 # 3. Download extractor.py and Readability.js into ~/web-extractor/
 
 # 4. Run the service
-python3 ~/web-extractor/extractor.py
+python3 ~/.web-extractor/extractor.py
 
 # 5. Configure Hermes Agent to use the local service
 pip install firecrawl

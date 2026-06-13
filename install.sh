@@ -29,7 +29,7 @@ set -euo pipefail
 DOWNLOAD_URL_EXTRACTOR="https://raw.githubusercontent.com/r8ceh/web-extractor/main/extractor.py"
 DOWNLOAD_URL_READABILITY="https://raw.githubusercontent.com/r8ceh/web-extractor/main/Readability.js"
 
-INSTALL_DIR="$HOME/web-extractor"
+INSTALL_DIR="$HOME/.web-extractor"
 VENV_DIR="$INSTALL_DIR/.venv"
 EXTRACTOR_PATH="$INSTALL_DIR/extractor.py"
 SERVICE_PORT="3002"
