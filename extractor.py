@@ -18,6 +18,7 @@ Hermes config:
 """
 
 import asyncio
+import copy
 import itertools
 import logging
 import os
@@ -36,10 +37,14 @@ logger = logging.getLogger(__name__)
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
+__version__ = "0.1.0"
+
 MAX_CONCURRENT = 10          # max concurrent pages
 CACHE_TTL = 300              # cache TTL: 5 minutes
 CACHE_MAX_SIZE = 1000        # max cache entries
 REQUEST_TIMEOUT = 30_000     # page load timeout (ms)
+NETWORK_IDLE_TIMEOUT = 5_000 # ms, max wait for network idle
+EVALUATE_TIMEOUT_S = 10.0    # seconds, max wait for Readability.js in browser
 MARKDOWN_LINE_LIMIT = 2000   # max lines in output markdown
 HOST = "127.0.0.1"
 PORT = 3002
@@ -50,6 +55,7 @@ _browser: Optional[Browser] = None
 _browser_lock = asyncio.Lock()
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _cache = TTLCache(maxsize=CACHE_MAX_SIZE, ttl=CACHE_TTL)
+_READABILITY_JS: str = ""
 
 
 async def get_browser() -> Browser:
@@ -88,7 +94,7 @@ async def new_context(browser: Browser) -> BrowserContext:
         ),
         viewport={"width": 1280, "height": 800},
         java_script_enabled=True,
-        bypass_csp=True,
+        bypass_csp=True,  # required to inject Readability.js on CSP-protected pages
     )
 
 
@@ -142,25 +148,31 @@ async def _fetch_page(url: str) -> dict:
 
         # Wait for network idle, no more than 5 seconds
         try:
-            await page.wait_for_load_state("networkidle", timeout=5000)
+            await page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_TIMEOUT)
         except Exception:
             pass  # networkidle not reached — continue with what we have
 
-        await page.add_script_tag(path=READABILITY_JS_PATH)
+        await page.add_script_tag(content=_READABILITY_JS)
 
         # Parse with Readability
-        extracted = await page.evaluate("""
-            () => {
-                const reader = new Readability(document);
-                const result = reader.parse();
-                if (!result) return null;
-                return {
-                    title: result.title || document.title,
-                    html: result.content || '',
-                    text: result.textContent || ''
-                };
-            }
-        """)
+        try:
+            extracted = await asyncio.wait_for(
+                page.evaluate("""
+                    () => {
+                        const reader = new Readability(document);
+                        const result = reader.parse();
+                        if (!result) return null;
+                        return {
+                            title: result.title || document.title,
+                            html: result.content || '',
+                            text: result.textContent || ''
+                        };
+                    }
+                """),
+                timeout=EVALUATE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Content extraction timed out")
 
         if not extracted or not extracted.get("html"):
             raise HTTPException(status_code=422, detail="No content extracted")
@@ -172,8 +184,8 @@ async def _fetch_page(url: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error extracting {url}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error extracting {url}: {e!r}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Extraction failed")
     finally:
         if context:
             try:
@@ -189,7 +201,7 @@ async def extract_page(url: str) -> dict:
     result = _cache.get(url)
     if result is not None:
         logger.info(f"Cache hit: {url}")
-        return result
+        return copy.deepcopy(result)
 
     async with _semaphore:
         result = await _fetch_page(url)
@@ -202,15 +214,24 @@ async def extract_page(url: str) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load Readability.js into memory
+    global _READABILITY_JS
+    with open(READABILITY_JS_PATH, encoding="utf-8") as f:
+        _READABILITY_JS = f.read()
+
     # Warm up the browser on startup
     await get_browser()
     logger.info(f"Extractor ready. Max concurrent: {MAX_CONCURRENT}")
     yield
     # Shutdown
-    if _browser:
-        await _browser.close()
-    if _playwright:
-        await _playwright.stop()
+    global _browser, _playwright
+    async with _browser_lock:
+        if _browser:
+            await _browser.close()
+            _browser = None
+        if _playwright:
+            await _playwright.stop()
+            _playwright = None
     logger.info("Browser stopped")
 
 
@@ -232,7 +253,7 @@ class BatchRequest(BaseModel):
 def _format_batch_error(exc: Exception) -> dict:
     if isinstance(exc, HTTPException):
         return {"error": exc.detail, "success": False}
-    logger.error(f"Unexpected error in batch: {exc}", exc_info=True)
+    logger.error(f"Unexpected error in batch: {exc!r}", exc_info=True)
     return {"error": "Internal error", "success": False}
 
 
@@ -264,10 +285,11 @@ async def batch_scrape(req: BatchRequest):
 
 @app.get("/health")
 async def health():
-    browser = await get_browser()
+    connected = _browser is not None and _browser.is_connected()
     return {
         "status": "ok",
-        "browser": browser.is_connected(),
+        "version": __version__,
+        "browser": connected,
         "cache_size": len(_cache),
         "max_concurrent": MAX_CONCURRENT
     }
