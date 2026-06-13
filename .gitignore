@@ -1,0 +1,21 @@
+# Python bytecode
+__pycache__/
+
+# Claude Code (local settings)
+.claude/
+CLAUDE.md
+
+# AI assistant files (internal only)
+agent_docs/
+PROJECT.md
+PROJECT_USER.md
+STATUS.md
+TODO.md
+TODO_NEW.md
+TODO_REVIEW.md
+REVIEW.md
+REVIEW_SCRIPTS.md
+web-extractor.md
+claude-review.md
+consolidated-review.md
+deepseek_review.md
